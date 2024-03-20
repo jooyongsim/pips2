@@ -11,6 +11,7 @@ from fire import Fire
 import sys
 import cv2
 from pathlib import Path
+import pandas as pd
 
 def read_mp4(fn):
     vidcap = cv2.VideoCapture(fn)
@@ -23,33 +24,26 @@ def read_mp4(fn):
     vidcap.release()
     return frames
 
-import pandas as pd
-
 def read_points_of_interest(csv_path):
-    """
-    Read points of interest from a CSV file.
-    
-    Args:
-    - csv_path: Path to the CSV file containing points of interest.
-    
-    Returns:
-    - points: A NumPy array of points of interest.
-    """
     df = pd.read_csv(csv_path)
     points = df[['x', 'y']].to_numpy()
     return points
 
-def run_model(model, rgbs, S_max=128, N=64, iters=16, sw=None):
+def run_model(model, rgbs, points_of_interest, S_max=128, N=64, iters=16, sw=None):
     rgbs = rgbs.cuda().float() # B, S, C, H, W
 
     B, S, C, H, W = rgbs.shape
     assert(B==1)
 
     # pick N points to track; we'll use a uniform grid
-    points_of_interest = read_points_of_interest('path_to_your_csv_file.csv')  # Update with the actual path
-    xy0 = torch.tensor(points_of_interest, dtype=torch.float32).unsqueeze(0).cuda()  # Make sure points are in shape (B, N, 2)
-
+    N_ = np.sqrt(N).round().astype(np.int32)
+    grid_y, grid_x = utils.basic.meshgrid2d(B, N_, N_, stack=False, norm=False, device='cuda')
+    grid_y = 8 + grid_y.reshape(B, -1)/float(N_-1) * (H-16)
+    grid_x = 8 + grid_x.reshape(B, -1)/float(N_-1) * (W-16)
+    xy0 = torch.stack([grid_x, grid_y], dim=-1) # B, N_*N_, 2
     _, S, C, H, W = rgbs.shape
+
+    xy0 = torch.tensor(points_of_interest, dtype=torch.float32).unsqueeze(0).cuda()  # B, N, 2
 
     # zero-vel init
     trajs_e = xy0.unsqueeze(1).repeat(1,S,1,1)
@@ -70,6 +64,7 @@ def run_model(model, rgbs, S_max=128, N=64, iters=16, sw=None):
 
 def main(
         filename='./tracking_sample.mp4',
+        points_csv_path='./image0.csv',
         S=48, # seqlen
         N=1024, # number of points per clip
         stride=8, # spatial stride of the model
@@ -119,6 +114,8 @@ def main(
     global_step = 0
     model.eval()
 
+    points_of_interest = read_points_of_interest(points_csv_path)  # Read points from CSV
+
     idx = list(range(0, max(S_here-S,1), S))
     if max_iters:
         idx = idx[:max_iters]
@@ -141,18 +138,18 @@ def main(
         rgb_seq = F.interpolate(rgb_seq, image_size, mode='bilinear').unsqueeze(0) # 1,S,3,H,W
         
         with torch.no_grad():
-            trajs_e = run_model(model, rgb_seq, S_max=S, N=N, iters=iters, sw=sw_t)
+            trajs_e = run_model(model, rgb_seq, points_of_interest, S_max=S, N=N, iters=iters, sw=sw_t)
 
         iter_time = time.time()-iter_start_time
         
         print('%s; step %06d/%d; itime %.2f' % (
             model_name, global_step, max_iters, iter_time))
         
-    # After the loop in the main function
-    final_trajectories = trajs_e.squeeze().cpu().numpy()  # Assuming trajs_e shape is (1, S, N, 2)
-    final_df = pd.DataFrame(final_trajectories.reshape(-1, 2), columns=['x', 'y'])
-    final_df.to_csv('save_trajectory.csv', index=False)
-            
+        # After the loop in the main function
+        final_trajectories = trajs_e.squeeze().cpu().numpy()  # Assuming trajs_e shape is (1, S, N, 2)
+        final_df = pd.DataFrame(final_trajectories.reshape(-1, 2), columns=['x', 'y'])
+        final_df.to_csv('save_trajectory.csv', index=False)
+        
     writer_t.close()
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import time
 import numpy as np
+import pandas as pd
 import saverloader
 from nets.pips2 import Pips
 import utils.improc
@@ -15,111 +16,80 @@ from pathlib import Path
 def read_mp4(fn):
     vidcap = cv2.VideoCapture(fn)
     frames = []
-    while(vidcap.isOpened()):
+    while vidcap.isOpened():
         ret, frame = vidcap.read()
-        if ret == False:
+        if not ret:
             break
         frames.append(frame)
     vidcap.release()
     return frames
 
-import pandas as pd
-
 def read_points_of_interest(csv_path):
-    """
-    Read points of interest from a CSV file.
-    
-    Args:
-    - csv_path: Path to the CSV file containing points of interest.
-    
-    Returns:
-    - points: A NumPy array of points of interest.
-    """
     df = pd.read_csv(csv_path)
     points = df[['x', 'y']].to_numpy()
     return points
 
-def run_model(model, rgbs, S_max=128, N=64, iters=16, sw=None):
-    rgbs = rgbs.cuda().float() # B, S, C, H, W
+def run_model(model, rgbs, points_of_interest, S_max=128, iters=16, sw=None):
+    rgbs = rgbs.cuda().float()  # B, S, C, H, W
 
     B, S, C, H, W = rgbs.shape
-    assert(B==1)
+    assert B == 1
 
-    # pick N points to track; we'll use a uniform grid
-    points_of_interest = read_points_of_interest('path_to_your_csv_file.csv')  # Update with the actual path
-    xy0 = torch.tensor(points_of_interest, dtype=torch.float32).unsqueeze(0).cuda()  # Make sure points are in shape (B, N, 2)
-
-    _, S, C, H, W = rgbs.shape
+    xy0 = torch.tensor(points_of_interest, dtype=torch.float32).unsqueeze(0).cuda()  # B, N, 2
 
     # zero-vel init
-    trajs_e = xy0.unsqueeze(1).repeat(1,S,1,1)
+    trajs_e = xy0.unsqueeze(1).repeat(1, S, 1, 1)
 
     iter_start_time = time.time()
     
     preds, preds_anim, _, _ = model(trajs_e, rgbs, iters=iters, feat_init=None, beautify=True)
     trajs_e = preds[-1]
 
-    iter_time = time.time()-iter_start_time
-    print('inference time: %.2f seconds (%.1f fps)' % (iter_time, S/iter_time))
+    iter_time = time.time() - iter_start_time
+    print('inference time: %.2f seconds (%.1f fps)' % (iter_time, S / iter_time))
 
     if sw is not None and sw.save_this:
         rgbs_prep = utils.improc.preprocess_color(rgbs)
-        sw.summ_traj2ds_on_rgbs('outputs/trajs_on_rgbs', trajs_e[0:1], utils.improc.preprocess_color(rgbs[0:1]), cmap='hot', linewidth=1, show_dots=False)
+        sw.summ_traj2ds_on_rgbs('outputs/trajs_on_rgbs', trajs_e[0:1], rgbs_prep[0:1], cmap='hot', linewidth=1, show_dots=False)
     return trajs_e
-
 
 def main(
         filename='./tracking_sample.mp4',
-        S=48, # seqlen
-        N=1024, # number of points per clip
-        stride=8, # spatial stride of the model
+        points_csv_path='image0.csv',
+        S=48,  # seqlen
         timestride=1, # temporal stride of the model
-        iters=16, # inference steps of the model
-        image_size=(512,896), # input resolution
-        max_iters=4, # number of clips to run
-        shuffle=False, # dataset shuffling
-        log_freq=1, # how often to make image summaries
+        iters=16,  # inference steps of the model
+        image_size=(512, 896),  # input resolution
+        max_iters=4,  # number of clips to run
+        log_freq=1,  # how often to make image summaries
         log_dir='./logs_demo',
         init_dir='./reference_model',
         device_ids=[0],
 ):
-
-    # the idea in this file is to run the model on a demo video,
-    # and return some visualizations
-    
-    exp_name = 'de00' # copy from dev repo
-
     print('filename', filename)
     name = Path(filename).stem
     print('name', name)
-    
+
     rgbs = read_mp4(filename)
-    rgbs = np.stack(rgbs, axis=0) # S,H,W,3
-    rgbs = rgbs[:,:,:,::-1].copy() # BGR->RGB
+    rgbs = np.stack(rgbs, axis=0)  # S,H,W,3
+    rgbs = rgbs[..., ::-1].copy()  # BGR->RGB
     rgbs = rgbs[::timestride]
-    S_here,H,W,C = rgbs.shape
+    S_here, H, W, C = rgbs.shape
     print('rgbs', rgbs.shape)
 
-    # autogen a name
-    model_name = "%s_%d_%d_%s" % (name, S, N, exp_name)
-    import datetime
-    model_date = datetime.datetime.now().strftime('%H:%M:%S')
-    model_name = model_name + '_' + model_date
+    model_name = f"{name}_{S}_demo_{time.strftime('%Y%m%d-%H%M%S')}"
     print('model_name', model_name)
-    
-    log_dir = 'logs_demo'
-    writer_t = SummaryWriter(log_dir + '/' + model_name + '/t', max_queue=10, flush_secs=60)
 
-    global_step = 0
+    writer_t = SummaryWriter(f'{log_dir}/{model_name}/t', max_queue=10, flush_secs=60)
 
     model = Pips(stride=8).cuda()
-    parameters = list(model.parameters())
     if init_dir:
         _ = saverloader.load(init_dir, model)
-    global_step = 0
     model.eval()
 
-    idx = list(range(0, max(S_here-S,1), S))
+    points_of_interest = read_points_of_interest(points_csv_path)  # Read points from CSV
+
+    idx = list(range(0, max(S_here - S, 1), S))
     if max_iters:
         idx = idx[:max_iters]
     
