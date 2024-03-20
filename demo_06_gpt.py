@@ -120,7 +120,7 @@ def main(
     global_step = 0
     model.eval()
 
-    original_image_size = rgbs[0].shape[:2][::-1]  # Height, Width
+    original_image_size = rgbs[0].shape[:2] #[::-1]  # Height, Width
 
     points_of_interest = read_points_of_interest(points_csv_path, original_image_size, image_size)  # Read points from CSV
 
