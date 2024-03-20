@@ -26,7 +26,7 @@ def read_mp4(fn):
 
 def read_points_of_interest(csv_path):
     df = pd.read_csv(csv_path)
-    points = df[['x', 'y']].to_numpy()
+    points = df[['X', 'Y']].to_numpy()
     return points
 
 def run_model(model, rgbs, points_of_interest, S_max=128, N=64, iters=16, sw=None):
